@@ -13,80 +13,92 @@ def euclidean_distance(v1: np.ndarray, v2: np.ndarray) -> float:
     """Compute Euclidean distance between two vectors."""
     return float(np.sqrt(np.sum((v1 - v2) ** 2)))
 
-def brute_force_search(database: np.ndarray, queries: np.ndarray, threshold: float) -> tuple[bool, list[int] | None, list[float] | None]:
+def run_bruteforce(config, phase='build', data_structure=None):
     """
-    For each query vector, search through database to find any vector within threshold distance.
+    Run brute force search algorithm.
     
     Args:
-        database: Array of shape (n_database, dimension) containing database vectors
-        queries: Array of shape (n_queries, dimension) containing query vectors
-        threshold: Maximum allowed Euclidean distance between any query and its match
+        config: Configuration dictionary with parameters
+        phase: Either 'build' or 'search'
+        data_structure: For brute force, this is just the database vectors
         
     Returns:
-        Tuple containing:
-            - Boolean indicating if matches were found for all queries
-            - If successful, list of database indices matched to each query
-            - If successful, list of distances for each query-match pair
+        If phase == 'build': Returns the database vectors
+        If phase == 'search': Returns (success, matches, distances) tuple
     """
-    n_queries = len(queries)
-    n_database = len(database)
-    
-    print(f"\nBrute force searching for each query...")
-    print(f"Number of queries: {n_queries}")
-    print(f"Database size: {n_database}")
-    
-    matches = []
-    distances = []
-    
-    # For each query
-    for query_idx, query in enumerate(queries):
-        print(f"\nProcessing query {query_idx + 1}/{n_queries}")
-        found_match = False
+    if phase == 'build':
+        # Generate or load database vectors
+        n_database = config['n_database']
+        dimension = config['dimension']
+        seed = config['seed']
+        database = generate_random_vectors(n_database, dimension, seed)
+        return database
         
-        # Try each database vector
-        for db_idx in tqdm(range(n_database), desc="Searching database"):
-            dist = euclidean_distance(query, database[db_idx])
-            if dist <= threshold:
-                matches.append(db_idx)
-                distances.append(dist)
-                found_match = True
-                print(f"Found match at index {db_idx} with distance {dist:.4f}")
-                break
+    elif phase == 'search':
+        database = data_structure  # In brute force, data_structure is just the database
+        if database is None:
+            raise ValueError("Must provide database vectors for search phase")
+            
+        # Generate or load query vectors
+        n_queries = config['n_queries']
+        dimension = config['dimension']
+        seed = config['seed']
+        threshold = config['threshold']
+        queries = generate_random_vectors(n_queries, dimension, seed + 1)
         
-        if not found_match:
-            print(f"No match found for query {query_idx}")
-            return False, None, None
-    
-    return True, matches, distances
+        n_database = len(database)
+        matches = []
+        distances = []
+        
+        # For each query
+        for query_idx, query in enumerate(queries):
+            found_match = False
+            
+            # Try each database vector
+            for db_idx in tqdm(range(n_database), desc=f"Query {query_idx + 1}/{n_queries}"):
+                dist = euclidean_distance(query, database[db_idx])
+                if dist <= threshold:
+                    matches.append(db_idx)
+                    distances.append(dist)
+                    found_match = True
+                    break
+            
+            if not found_match:
+                return False, None, None
+        
+        return True, matches, distances
 
 if __name__ == "__main__":
     # Get parameters from config
-    n_database = VECTOR_SEARCH_CONFIG['n_database']
-    n_queries = VECTOR_SEARCH_CONFIG['n_queries']
-    dimension = VECTOR_SEARCH_CONFIG['dimension']
-    threshold = VECTOR_SEARCH_CONFIG['threshold']
-    seed = VECTOR_SEARCH_CONFIG['seed']
+    config = VECTOR_SEARCH_CONFIG.copy()
     
     print(f"\nRunning brute force search with parameters:")
-    print(f"Database size: {n_database}")
-    print(f"Number of queries: {n_queries}")
-    print(f"Dimension: {dimension}")
-    print(f"Distance threshold: {threshold}")
-    print(f"Random seed: {seed}")
+    print(f"Database size: {config['n_database']}")
+    print(f"Number of queries: {config['n_queries']}")
+    print(f"Dimension: {config['dimension']}")
+    print(f"Distance threshold: {config['threshold']}")
+    print(f"Random seed: {config['seed']}")
     
-    # Generate test data
-    database = generate_random_vectors(n_database, dimension, seed)
-    queries = generate_random_vectors(n_queries, dimension, seed + 1)  # Different seed
+    # Build phase
+    print("\nBuilding (preparing database)...")
+    build_start = time.time()
+    database = run_bruteforce(config, phase='build')
+    build_time = time.time() - build_start
+    print(f"Build time: {build_time:.2f} seconds")
     
-    # Run search and time it
-    total_start = time.time()
-    success, matches, distances = brute_force_search(database, queries, threshold)
-    total_time = time.time() - total_start
+    # Search phase
+    print("\nSearching for matches...")
+    search_start = time.time()
+    success, matches, distances = run_bruteforce(config, phase='search', data_structure=database)
+    search_time = time.time() - search_start
     
     # Print results
     print(f"\nResults:")
     print(f"Solution found: {success}")
-    print(f"Total time: {total_time:.2f} seconds")
+    print(f"Build time: {build_time:.2f} seconds")
+    print(f"Search time: {search_time:.2f} seconds")
+    print(f"Total time: {build_time + search_time:.2f} seconds")
+    
     if success:
         print("\nFound matches with distances:")
         for i, (idx, dist) in enumerate(zip(matches, distances)):

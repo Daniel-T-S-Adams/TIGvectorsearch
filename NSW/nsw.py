@@ -1,15 +1,27 @@
 import numpy as np
-from typing import List, Optional, Tuple, Dict, Set
+from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
 import heapq
-from dataclasses import dataclass, field
 from tqdm import tqdm
 import time
+import sys
+import os
+
+# Add parent directory to Python path to import config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import VECTOR_SEARCH_CONFIG
+
+def generate_random_vectors(n_vectors: int, dimension: int, seed: int = None) -> np.ndarray:
+    """Generate random vectors with components from uniform[0,1]."""
+    if seed is not None:
+        np.random.seed(seed)
+    return np.random.uniform(0, 1, size=(n_vectors, dimension))
 
 @dataclass(order=True)
 class DistanceEntry:
-    """Helper class for priority queue operations."""
+    """Entry for priority queue, ordered by distance."""
     distance: float
-    index: int = field(compare=False)
+    index: int
 
 class NSW:
     """
@@ -32,7 +44,7 @@ class NSW:
     def euclidean_distance(self, v1: np.ndarray, v2: np.ndarray) -> float:
         """Compute Euclidean distance between two vectors."""
         return float(np.sqrt(np.sum((v1 - v2) ** 2)))
-    
+        
     def find_nearest_neighbors(self, query: np.ndarray, entry_point: int) -> List[DistanceEntry]:
         """
         Find M nearest neighbors of a query vector using greedy search through the graph.
@@ -84,66 +96,100 @@ class NSW:
                 break
         
         return nearest
-    
+        
     def build_graph(self, vectors: np.ndarray) -> None:
         """
         Build the NSW graph by incrementally adding vectors.
-        Each vector is connected to its M nearest neighbors.
         
         Args:
-            vectors: Array of shape (n_vectors, dimension) containing vectors
+            vectors: Array of vectors to build graph from
         """
         self.vectors = vectors
         n_vectors = len(vectors)
         
-        # Start with first vector
+        # Add first vector
         self.graph[0] = set()
         
         # Add remaining vectors
-        for i in tqdm(range(1, n_vectors), desc="Building NSW graph"):
-            # Find nearest neighbors of current vector
-            entry_point = np.random.randint(i)  # Random entry point from existing graph
-            neighbors = self.find_nearest_neighbors(vectors[i], entry_point)
+        for idx in tqdm(range(1, n_vectors), desc="Building NSW graph"):
+            # Find nearest neighbors among existing vertices
+            entry_point = np.random.randint(idx)  # Random entry point
+            neighbors = self.find_nearest_neighbors(vectors[idx], entry_point)
             
-            # Add edges to M nearest neighbors
-            self.graph[i] = set()
+            # Add edges to graph (both directions)
+            self.graph[idx] = set(n.index for n in neighbors)
             for neighbor in neighbors:
-                self.graph[i].add(neighbor.index)
-                self.graph[neighbor.index].add(i)  # Add bidirectional edge
+                self.graph[neighbor.index].add(idx)
+                
+                # Ensure max_neighbors constraint
+                if len(self.graph[neighbor.index]) > self.max_neighbors:
+                    # Remove furthest neighbor
+                    furthest = max(
+                        self.graph[neighbor.index],
+                        key=lambda x: self.euclidean_distance(vectors[neighbor.index], vectors[x])
+                    )
+                    self.graph[neighbor.index].remove(furthest)
+                    self.graph[furthest].remove(neighbor.index)
+
+def run_nsw(config, phase='build', data_structure=None):
+    """
+    Run NSW algorithm.
     
-    def search(self, queries: np.ndarray, threshold: float, n_tries: int = 3) -> Tuple[bool, Optional[List[int]]]:
-        """
-        For each query vector, try to find a database vector within threshold distance.
-        Makes multiple attempts with different entry points for each query.
+    Args:
+        config: Configuration dictionary with parameters
+        phase: Either 'build' or 'search'
+        data_structure: Tuple of (NSW instance, database vectors)
         
-        Args:
-            queries: Array of shape (n_queries, dimension) containing query vectors
-            threshold: Maximum allowed distance between any query and its match
-            n_tries: Number of attempts with different entry points per query
+    Returns:
+        If phase == 'build': Returns the data structure tuple
+        If phase == 'search': Returns (success, matches, distances) tuple
+    """
+    if phase == 'build':
+        # Generate or load database vectors
+        n_database = config['n_database']
+        dimension = config['dimension']
+        seed = config['seed']
+        database = generate_random_vectors(n_database, dimension, seed)
+        
+        # Build NSW graph
+        print("Building NSW graph...")
+        nsw = NSW(max_neighbors=16)
+        nsw.build_graph(database)
+        
+        return (nsw, database)
+        
+    elif phase == 'search':
+        if data_structure is None:
+            raise ValueError("Must provide data structure for search phase")
             
-        Returns:
-            Tuple containing:
-                - Boolean indicating if matches were found for all queries
-                - If successful, list of database indices matched to each query
-        """
-        if self.vectors is None:
-            raise ValueError("Must build graph before searching")
+        nsw, database = data_structure
         
-        n_queries = len(queries)
+        # Generate query vectors
+        n_queries = config['n_queries']
+        dimension = config['dimension']
+        seed = config['seed']
+        threshold = config['threshold']
+        queries = generate_random_vectors(n_queries, dimension, seed + 1)
+        
+        # Search for matches
         matches = []
+        distances = []
+        n_tries = 3  # Number of attempts with different entry points per query
         
-        for query_idx, query in enumerate(tqdm(queries, desc="Processing queries")):
+        print("Searching for matches...")
+        for query_idx, query in enumerate(tqdm(queries)):
             found_match = False
             
             # Try multiple random entry points
             for _ in range(n_tries):
-                entry_point = np.random.randint(len(self.vectors))
-                neighbors = self.find_nearest_neighbors(query, entry_point)
+                entry_point = np.random.randint(len(database))
+                neighbors = nsw.find_nearest_neighbors(query, entry_point)
                 
                 # Check if any neighbor is within threshold
                 for neighbor in neighbors:
                     if neighbor.distance <= threshold:
                         matches.append(neighbor.index)
+                        distances.append(neighbor.distance)
                         found_match = True
                         break
                 
@@ -151,50 +197,44 @@ class NSW:
                     break
             
             if not found_match:
-                return False, None
+                return False, None, None
         
-        return True, matches
+        return True, matches, distances
 
 if __name__ == "__main__":
-    # Test parameters
-    n_database = 100000
-    n_queries = 1
-    dimension = 250
-    threshold = 6.0
-    seed = 42
+    # Load parameters from config
+    config = VECTOR_SEARCH_CONFIG.copy()
     
     print(f"\nRunning NSW search with parameters:")
-    print(f"Database size: {n_database}")
-    print(f"Number of queries: {n_queries}")
-    print(f"Dimension: {dimension}")
-    print(f"Distance threshold: {threshold}")
-    print(f"Random seed: {seed}")
+    print(f"Database size: {config['n_database']}")
+    print(f"Number of queries: {config['n_queries']}")
+    print(f"Dimension: {config['dimension']}")
+    print(f"Distance threshold: {config['threshold']}")
+    print(f"Random seed: {config['seed']}")
     
-    # Generate test data
-    np.random.seed(seed)
-    database = np.random.uniform(0, 1, size=(n_database, dimension))
-    np.random.seed(seed + 1)  # Different seed for queries
-    queries = np.random.uniform(0, 1, size=(n_queries, dimension))
-    
-    # Build and search
-    nsw = NSW(max_neighbors=16)
-    
-    print("\nBuilding NSW graph...")
+    # Build phase
+    print("\nBuilding data structures...")
     build_start = time.time()
-    nsw.build_graph(database)
+    data_structure = run_nsw(config, phase='build')
     build_time = time.time() - build_start
     print(f"Build time: {build_time:.2f} seconds")
     
+    # Search phase
     print("\nSearching for matches...")
     search_start = time.time()
-    success, matches = nsw.search(queries, threshold)
+    success, matches, distances = run_nsw(config, phase='search', data_structure=data_structure)
     search_time = time.time() - search_start
     
-    print("\nResults:")
+    # Print results
+    print(f"\nResults:")
     print(f"Solution found: {success}")
+    print(f"Build time: {build_time:.2f} seconds")
     print(f"Search time: {search_time:.2f} seconds")
+    print(f"Total time: {build_time + search_time:.2f} seconds")
+    
     if success:
         print("\nFound matches with distances:")
-        for i, db_idx in enumerate(matches):
-            dist = nsw.euclidean_distance(queries[i], database[db_idx])
-            print(f"Query {i} -> Database[{db_idx}]: distance = {dist:.4f}") 
+        for i, (idx, dist) in enumerate(zip(matches, distances)):
+            print(f"Query {i} -> Database[{idx}]: distance = {dist:.4f}")
+    else:
+        print("Failed to find matches for all queries") 
