@@ -121,14 +121,11 @@ def run_kdtree(config, phase='build', data_structure=None):
         If phase == 'search': Returns (success, matches, distances) tuple
     """
     if phase == 'build':
-        # Generate or load database vectors
-        n_database = config['n_database']
-        dimension = config['dimension']
-        seed = config['seed']
-        database = generate_random_vectors(n_database, dimension, seed)
-        
+        if 'database' not in config:
+            raise ValueError("Database vectors must be provided in config")
+            
         # Build KD-tree
-        print("Building KD-tree...")
+        database = config['database']
         kdtree = KDTree()
         kdtree.build_tree(database)
         
@@ -137,15 +134,12 @@ def run_kdtree(config, phase='build', data_structure=None):
     elif phase == 'search':
         if data_structure is None:
             raise ValueError("Must provide data structure for search phase")
+        if 'queries' not in config or 'threshold' not in config:
+            raise ValueError("Queries and threshold must be provided in config")
             
         kdtree, database = data_structure
-        
-        # Generate query vectors
-        n_queries = config['n_queries']
-        dimension = config['dimension']
-        seed = config['seed']
+        queries = config['queries']
         threshold = config['threshold']
-        queries = generate_random_vectors(n_queries, dimension, seed + 1)
         
         # Search for matches
         matches = []

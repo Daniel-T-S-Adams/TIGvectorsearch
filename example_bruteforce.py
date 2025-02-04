@@ -1,5 +1,4 @@
 import numpy as np
-from tqdm import tqdm
 import time
 from config import VECTOR_SEARCH_CONFIG
 
@@ -9,9 +8,15 @@ def generate_random_vectors(n_vectors: int, dimension: int, seed: int = None) ->
         np.random.seed(seed)
     return np.random.uniform(0, 1, size=(n_vectors, dimension))
 
-def euclidean_distance(v1: np.ndarray, v2: np.ndarray) -> float:
-    """Compute Euclidean distance between two vectors."""
-    return float(np.sqrt(np.sum((v1 - v2) ** 2)))
+def euclidean_distances_vectorized(queries: np.ndarray, database: np.ndarray) -> np.ndarray:
+    """Compute Euclidean distances between all queries and database vectors efficiently."""
+    # Compute squared Euclidean distances using broadcasting
+    # (a-b)^2 = a^2 + b^2 - 2ab
+    queries_squared = np.sum(queries**2, axis=1)[:, np.newaxis]
+    database_squared = np.sum(database**2, axis=1)[np.newaxis, :]
+    cross_term = -2 * np.dot(queries, database.T)
+    distances = np.sqrt(queries_squared + database_squared + cross_term)
+    return distances
 
 def run_bruteforce(config, phase='build', data_structure=None):
     """
@@ -20,50 +25,42 @@ def run_bruteforce(config, phase='build', data_structure=None):
     Args:
         config: Configuration dictionary with parameters
         phase: Either 'build' or 'search'
-        data_structure: For brute force, this is just the database vectors
+        data_structure: Database vectors from build phase
         
     Returns:
         If phase == 'build': Returns the database vectors
         If phase == 'search': Returns (success, matches, distances) tuple
     """
     if phase == 'build':
-        # Generate or load database vectors
-        n_database = config['n_database']
-        dimension = config['dimension']
-        seed = config['seed']
-        database = generate_random_vectors(n_database, dimension, seed)
-        return database
+        if 'database' not in config:
+            raise ValueError("Database vectors must be provided in config")
+        return config['database']
         
     elif phase == 'search':
-        database = data_structure  # In brute force, data_structure is just the database
-        if database is None:
+        if data_structure is None:
             raise ValueError("Must provide database vectors for search phase")
+        if 'queries' not in config or 'threshold' not in config:
+            raise ValueError("Queries and threshold must be provided in config")
             
-        # Generate or load query vectors
-        n_queries = config['n_queries']
-        dimension = config['dimension']
-        seed = config['seed']
+        database = data_structure
+        queries = config['queries']
         threshold = config['threshold']
-        queries = generate_random_vectors(n_queries, dimension, seed + 1)
         
-        n_database = len(database)
+        # Calculate all distances at once
+        all_distances = euclidean_distances_vectorized(queries, database)
+        
+        # Find the first match for each query that's within threshold
         matches = []
         distances = []
         
-        # For each query
-        for query_idx, query in enumerate(queries):
-            found_match = False
+        for query_idx, query_distances in enumerate(all_distances):
+            min_idx = np.argmin(query_distances)
+            min_dist = query_distances[min_idx]
             
-            # Try each database vector
-            for db_idx in tqdm(range(n_database), desc=f"Query {query_idx + 1}/{n_queries}"):
-                dist = euclidean_distance(query, database[db_idx])
-                if dist <= threshold:
-                    matches.append(db_idx)
-                    distances.append(dist)
-                    found_match = True
-                    break
-            
-            if not found_match:
+            if min_dist <= threshold:
+                matches.append(int(min_idx))
+                distances.append(float(min_dist))
+            else:
                 return False, None, None
         
         return True, matches, distances

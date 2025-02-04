@@ -1,8 +1,12 @@
 import numpy as np
 from typing import List, Optional, Tuple, Union
 from dataclasses import dataclass
-from tqdm import tqdm
 import time
+import sys
+import os
+
+# Add parent directory to Python path to import config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import VECTOR_SEARCH_CONFIG
 
 @dataclass
@@ -14,23 +18,47 @@ class KDNode:
     left: Optional['KDNode']   # Left child (values less than split)
     right: Optional['KDNode']  # Right child (values greater than split)
 
-class KDTree:
+class KDTreeTrueMeanFilter:
     """
-    KD-tree implementation for vector search.
-    Builds a balanced KD-tree from the database vectors, then uses it
-    to efficiently find vectors within a threshold distance of queries.
+    KD-tree implementation with true mean filtering optimization for vector search.
+    Filters database vectors based on true mean vector (all components = 0.5) before building KD-tree,
+    then uses both KD-tree and brute force for efficient vector matching.
     """
     
     def __init__(self):
-        """Initialize an empty KD-tree."""
+        """Initialize an empty KD-tree with filtering."""
         self.root: Optional[KDNode] = None
+        self.r_vectors: Optional[np.ndarray] = None  # Remaining vectors not in KD-tree
+        self.r_indices: Optional[np.ndarray] = None  # Indices of remaining vectors
+        self.kd_indices: Optional[np.ndarray] = None  # Indices of vectors in KD-tree
         self.dimension: Optional[int] = None
+        self.database: Optional[np.ndarray] = None  # Store full database for distance calculations
     
-    def euclidean_distance_vectorized(self, query: np.ndarray, points: np.ndarray) -> np.ndarray:
-        """Compute Euclidean distances between a query and multiple points efficiently."""
-        # Use broadcasting to compute distances
-        diff = query - points
-        return np.sqrt(np.sum(diff * diff, axis=1))
+    def euclidean_distance(self, v1: np.ndarray, v2: np.ndarray) -> float:
+        """Compute Euclidean distance between two vectors."""
+        return float(np.sqrt(np.sum((v1 - v2) ** 2)))
+    
+    def calculate_true_mean_vector(self, dimension: int) -> np.ndarray:
+        """Return the true mean vector (all components = 0.5)."""
+        return np.full(dimension, 0.5)
+    
+    def filter_relevant_vectors(self, database: np.ndarray, true_mean: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Select the top-k closest database vectors to the true mean vector.
+        
+        Args:
+            database: Array of database vectors
+            true_mean: True mean vector (all components = 0.5)
+            k: Number of closest vectors to select
+        
+        Returns:
+            A tuple containing:
+                - Filtered database vectors
+                - Their corresponding original indices
+        """
+        distances = np.linalg.norm(database - true_mean, axis=1)
+        closest_indices = np.argsort(distances)[:k]
+        return database[closest_indices], closest_indices
     
     def _select_axis(self, depth: int) -> int:
         """Select splitting axis based on current depth."""
@@ -73,18 +101,77 @@ class KDTree:
         
         return node
     
-    def build_tree(self, database: np.ndarray) -> None:
+    def calculate_distances_to_true_mean(self, database: np.ndarray) -> np.ndarray:
         """
-        Build the KD-tree from database vectors.
+        Efficiently calculate distances from all database vectors to true mean (0.5).
+        Uses the formula: distance² = Σxᵢ² - Σxᵢ + 0.25d
+        where d is the dimension.
+        
+        Args:
+            database: Array of database vectors
+            
+        Returns:
+            Array of distances to true mean
+        """
+        # Precompute sums and sum of squares for each vector
+        sums = np.sum(database, axis=1)  # Σxᵢ for each vector
+        sum_squares = np.sum(database * database, axis=1)  # Σxᵢ² for each vector
+        
+        # Calculate squared distances using the formula
+        dimension = database.shape[1]
+        squared_distances = sum_squares - sums + 0.25 * dimension
+        
+        # Return actual distances
+        return np.sqrt(squared_distances)
+    
+    def build_tree(self, database: np.ndarray, n_queries: int) -> None:
+        """
+        Build the KD-tree from filtered database vectors.
         
         Args:
             database: Array of shape (n_database, dimension) containing vectors
+            n_queries: Number of queries (used to compute filtering parameters)
         """
-        print("\nBuilding KD-tree...")
         self.dimension = database.shape[1]
-        indices = np.arange(len(database))
-        self.root = self._build_tree(database, indices, depth=0)
-        self.database = database  # Store for distance calculations
+        self.database = database
+        
+        # Compute filtering parameters
+        max_fuel = 2_000_000_000
+        base_fuel = 760_000_000
+        alpha = 1700 * n_queries
+        m = int((max_fuel - base_fuel) / alpha)  # Number of vectors for KD-tree
+        
+        print(f"Filtering {m} closest database vectors for KD-tree")
+        
+        # Time each step
+        t0 = time.time()
+        
+        # Step 1: Calculate distances using optimized method
+        distances = self.calculate_distances_to_true_mean(database)
+        t1 = time.time()
+        print(f"  Time to calculate distances: {(t1-t0)*1000:.2f}ms")
+        
+        # Step 2: Sort and select closest vectors
+        closest_indices = np.argsort(distances)[:m]
+        kd_vectors = database[closest_indices]
+        self.kd_indices = closest_indices
+        t2 = time.time()
+        print(f"  Time to sort and select vectors: {(t2-t1)*1000:.2f}ms")
+        
+        # Step 3: Get remaining vectors
+        mask = np.ones(len(database), dtype=bool)
+        mask[self.kd_indices] = False
+        self.r_vectors = database[mask]
+        self.r_indices = np.arange(len(database))[mask]
+        t3 = time.time()
+        print(f"  Time to get remaining vectors: {(t3-t2)*1000:.2f}ms")
+        
+        # Step 4: Build KD-tree
+        print(f"Building KD-tree with {m} vectors...")
+        self.root = self._build_tree(kd_vectors, self.kd_indices, depth=0)
+        t4 = time.time()
+        print(f"  Time to build tree: {(t4-t3)*1000:.2f}ms")
+        print(f"Total build time: {(t4-t0)*1000:.2f}ms")
     
     def _search_node(self, node: Optional[KDNode], query: np.ndarray, threshold: float,
                     best_dist: float, best_node: Optional[KDNode]) -> Tuple[float, Optional[KDNode]]:
@@ -136,6 +223,7 @@ class KDTree:
     def search(self, queries: np.ndarray, threshold: float) -> Tuple[bool, Optional[List[int]], Optional[List[float]]]:
         """
         For each query vector, try to find a database vector within threshold distance.
+        Uses KD-tree for initial search and brute force for worst matches.
         
         Args:
             queries: Array of shape (n_queries, dimension) containing query vectors
@@ -155,57 +243,69 @@ class KDTree:
         
         # Process each query
         for query in queries:
-            # Search for closest point within threshold
+            # Search KD-tree first
             best_dist, best_node = self._search_node(
                 self.root, query, threshold,
                 float('inf'), None
             )
             
-            # If no point found within threshold, search fails
+            # If no match found in KD-tree, try brute force on remaining vectors
             if best_node is None:
-                return False, None, None
-            
-            matches.append(best_node.index)
-            distances.append(best_dist)
+                # Calculate distances to remaining vectors
+                r_distances = np.linalg.norm(self.r_vectors - query, axis=1)
+                best_r_idx = np.argmin(r_distances)
+                min_r_dist = r_distances[best_r_idx]
+                
+                if min_r_dist <= threshold:
+                    matches.append(self.r_indices[best_r_idx])
+                    distances.append(float(min_r_dist))
+                else:
+                    return False, None, None
+            else:
+                matches.append(best_node.index)
+                distances.append(best_dist)
         
         return True, matches, distances
 
 def run_kdtree(config, phase='build', data_structure=None):
     """
-    Run KD-tree search algorithm.
+    Run KD-tree search algorithm with true mean filtering optimization.
     
     Args:
         config: Configuration dictionary with parameters
         phase: Either 'build' or 'search'
-        data_structure: KDTree instance from build phase
+        data_structure: KDTreeTrueMeanFilter instance from build phase
         
     Returns:
-        If phase == 'build': Returns the KDTree instance
+        If phase == 'build': Returns the KDTreeTrueMeanFilter instance
         If phase == 'search': Returns (success, matches, distances) tuple
     """
     if phase == 'build':
         if 'database' not in config:
             raise ValueError("Database vectors must be provided in config")
             
-        # Build KD-tree
-        kdtree = KDTree()
-        kdtree.build_tree(config['database'])
+        # Build KD-tree with filtering
+        kdtree = KDTreeTrueMeanFilter()
+        # Get n_queries from config or use default from VECTOR_SEARCH_CONFIG
+        n_queries = config.get('n_queries', VECTOR_SEARCH_CONFIG['n_queries'])
+        kdtree.build_tree(config['database'], n_queries)
         return kdtree
         
     elif phase == 'search':
         if data_structure is None:
-            raise ValueError("Must provide KDTree instance for search phase")
+            raise ValueError("Must provide KDTreeTrueMeanFilter instance for search phase")
         if 'queries' not in config or 'threshold' not in config:
             raise ValueError("Queries and threshold must be provided in config")
             
         kdtree = data_structure
-        return kdtree.search(config['queries'], config['threshold'])
+        success, matches, distances = kdtree.search(config['queries'], config['threshold'])
+        return success, matches, distances
 
 if __name__ == "__main__":
     # Get parameters from config
     config = VECTOR_SEARCH_CONFIG.copy()
     
-    print(f"\nRunning KD-tree search with parameters:")
+    print(f"\nRunning KD-tree with true mean filtering search with parameters:")
     print(f"Database size: {config['n_database']}")
     print(f"Number of queries: {config['n_queries']}")
     print(f"Dimension: {config['dimension']}")
@@ -213,7 +313,7 @@ if __name__ == "__main__":
     print(f"Random seed: {config['seed']}")
     
     # Build phase
-    print("\nBuilding KD-tree...")
+    print("\nBuilding data structures...")
     build_start = time.time()
     kdtree = run_kdtree(config, phase='build')
     build_time = time.time() - build_start
