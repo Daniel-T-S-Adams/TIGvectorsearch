@@ -43,7 +43,7 @@ class AlgorithmRunner:
            # 'Brute Force': run_bruteforce,
            # 'KD-Tree (Vanilla)': run_kdtree_vanilla,
             'KD-Tree (Mean Filter)': run_kdtree_mean_filter,
-            'KD-Tree (Median Filter)': run_kdtree_median_filter,
+           # 'KD-Tree (Median Filter)': run_kdtree_median_filter,
           #  'KD-Tree (Random Filter)': run_kdtree_random_filter,
             'KD-Tree (True Mean Filter)': run_kdtree_true_mean_filter
         }
