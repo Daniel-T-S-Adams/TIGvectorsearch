@@ -33,6 +33,12 @@ class KDTreeMedianFilter:
         self.kd_indices: Optional[np.ndarray] = None  # Indices of vectors in KD-tree
         self.dimension: Optional[int] = None
         self.database: Optional[np.ndarray] = None  # Store full database for distance calculations
+        # Add timing statistics
+        self.kdtree_search_time: float = 0.0
+        self.bruteforce_search_time: float = 0.0
+        # Add match counting
+        self.n_kdtree_matches: int = 0  # Number of matches found by KD-tree search
+        self.n_bruteforce_matches: int = 0  # Number of matches found by brute force search
     
     def euclidean_distance(self, v1: np.ndarray, v2: np.ndarray) -> float:
         """Compute Euclidean distance between two vectors."""
@@ -205,29 +211,49 @@ class KDTreeMedianFilter:
         matches = []
         distances = []
         
+        # Reset statistics
+        self.kdtree_search_time = 0.0
+        self.bruteforce_search_time = 0.0
+        self.n_kdtree_matches = 0
+        self.n_bruteforce_matches = 0
+        
         # Process each query
         for query in queries:
             # Search KD-tree first
+            kdtree_start = time.time()
             best_dist, best_node = self._search_node(
                 self.root, query, threshold,
                 float('inf'), None
             )
+            self.kdtree_search_time += time.time() - kdtree_start
             
             # If no match found in KD-tree, try brute force on remaining vectors
             if best_node is None:
                 # Calculate distances to remaining vectors
+                bruteforce_start = time.time()
                 r_distances = np.linalg.norm(self.r_vectors - query, axis=1)
                 best_r_idx = np.argmin(r_distances)
                 min_r_dist = r_distances[best_r_idx]
+                self.bruteforce_search_time += time.time() - bruteforce_start
                 
                 if min_r_dist <= threshold:
                     matches.append(self.r_indices[best_r_idx])
                     distances.append(float(min_r_dist))
+                    self.n_bruteforce_matches += 1
+                    continue
                 else:
                     return False, None, None
             else:
                 matches.append(best_node.index)
                 distances.append(best_dist)
+                self.n_kdtree_matches += 1
+        
+        # Print match statistics
+        total_matches = self.n_kdtree_matches + self.n_bruteforce_matches
+        print("\nMatch Statistics:")
+        print(f"  Total matches found: {total_matches}")
+        print(f"  KD-tree matches: {self.n_kdtree_matches} ({(self.n_kdtree_matches/total_matches)*100:.1f}%)")
+        print(f"  Brute force matches: {self.n_bruteforce_matches} ({(self.n_bruteforce_matches/total_matches)*100:.1f}%)")
         
         return True, matches, distances
 

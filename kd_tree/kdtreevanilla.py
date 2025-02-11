@@ -25,6 +25,12 @@ class KDTree:
         """Initialize an empty KD-tree."""
         self.root: Optional[KDNode] = None
         self.dimension: Optional[int] = None
+        # Add timing statistics
+        self.kdtree_search_time: float = 0.0
+        self.bruteforce_search_time: float = 0.0  # Always 0 for vanilla KD-tree
+        # Add match counting
+        self.n_kdtree_matches: int = 0  # Number of matches found by KD-tree search
+        self.n_bruteforce_matches: int = 0  # Always 0 for vanilla KD-tree
     
     def euclidean_distance_vectorized(self, query: np.ndarray, points: np.ndarray) -> np.ndarray:
         """Compute Euclidean distances between a query and multiple points efficiently."""
@@ -153,13 +159,21 @@ class KDTree:
         matches = []
         distances = []
         
+        # Reset statistics
+        self.kdtree_search_time = 0.0
+        self.bruteforce_search_time = 0.0  # Always 0 for vanilla KD-tree
+        self.n_kdtree_matches = 0
+        self.n_bruteforce_matches = 0  # Always 0 for vanilla KD-tree
+        
         # Process each query
         for query in queries:
             # Search for closest point within threshold
+            kdtree_start = time.time()
             best_dist, best_node = self._search_node(
                 self.root, query, threshold,
                 float('inf'), None
             )
+            self.kdtree_search_time += time.time() - kdtree_start
             
             # If no point found within threshold, search fails
             if best_node is None:
@@ -167,6 +181,12 @@ class KDTree:
             
             matches.append(best_node.index)
             distances.append(best_dist)
+            self.n_kdtree_matches += 1
+        
+        # Print match statistics
+        print("\nMatch Statistics:")
+        print(f"  Total matches found: {self.n_kdtree_matches}")
+        print(f"  All matches found by KD-tree search")
         
         return True, matches, distances
 

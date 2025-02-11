@@ -18,11 +18,10 @@ class KDNode:
     left: Optional['KDNode']   # Left child (values less than split)
     right: Optional['KDNode']  # Right child (values greater than split)
 
-class KDTreeRandomFilter:
+class KDTreeMeanVarianceFilter:
     """
-    KD-tree implementation with random filtering optimization for vector search.
-    Simply keeps the first m vectors for the KD-tree and uses remaining vectors for brute force,
-    then uses both KD-tree and brute force for efficient vector matching.
+    KD-tree implementation with mean-based filtering optimization for vector search.
+    Also calculates variance along each dimension and splits along highest variance axes.
     """
     
     def __init__(self):
@@ -33,9 +32,12 @@ class KDTreeRandomFilter:
         self.kd_indices: Optional[np.ndarray] = None  # Indices of vectors in KD-tree
         self.dimension: Optional[int] = None
         self.database: Optional[np.ndarray] = None  # Store full database for distance calculations
+        self.variance: Optional[np.ndarray] = None  # Store variance along each dimension
+        self.used_axes: set = set()  # Track which axes have been used for splitting
+        self.sorted_variance_axes: Optional[np.ndarray] = None  # Axes sorted by variance
         # Add timing statistics
-        self.kdtree_search_time: float = 0.0
-        self.bruteforce_search_time: float = 0.0
+        self.kdtree_search_time: float = 0.0  # Time spent in KD-tree search
+        self.bruteforce_search_time: float = 0.0  # Time spent in brute force search
         # Add match counting
         self.n_kdtree_matches: int = 0  # Number of matches found by KD-tree search
         self.n_bruteforce_matches: int = 0  # Number of matches found by brute force search
@@ -44,24 +46,73 @@ class KDTreeRandomFilter:
         """Compute Euclidean distance between two vectors."""
         return float(np.sqrt(np.sum((v1 - v2) ** 2)))
     
-    def filter_vectors(self, database: np.ndarray, m: int) -> Tuple[np.ndarray, np.ndarray]:
+    def calculate_mean_and_variance(self, queries: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Simply select the first m vectors from the database.
+        Compute both mean and variance vectors of query vectors.
+        
+        Args:
+            queries: Array of query vectors
+            
+        Returns:
+            Tuple containing:
+                - Mean vector
+                - Variance vector
+        """
+        mean = np.mean(queries, axis=0)
+        variance = np.var(queries, axis=0)
+        return mean, variance
+    
+    def filter_relevant_vectors(self, database: np.ndarray, mean_query: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Select the top-k closest database vectors to the mean query vector.
         
         Args:
             database: Array of database vectors
-            m: Number of vectors to select for KD-tree
+            mean_query: Mean vector of all query vectors
+            k: Number of closest vectors to select
         
         Returns:
             A tuple containing:
-                - First m database vectors
-                - Their corresponding original indices (0 to m-1)
+                - Filtered database vectors
+                - Their corresponding original indices
         """
-        return database[:m], np.arange(m)
+        distances = np.linalg.norm(database - mean_query, axis=1)
+        closest_indices = np.argsort(distances)[:k]
+        return database[closest_indices], closest_indices
     
     def _select_axis(self, depth: int) -> int:
-        """Select splitting axis based on current depth."""
-        return depth % self.dimension
+        """
+        Select splitting axis based on variance.
+        Uses axes with highest variance first, without reusing axes.
+        Falls back to cyclic selection after using all high variance axes.
+        
+        Args:
+            depth: Current depth in tree (unused but kept for interface consistency)
+            
+        Returns:
+            Selected axis for splitting
+        """
+        # If we haven't sorted axes by variance yet, do it now
+        if self.sorted_variance_axes is None and self.variance is not None:
+            # Get indices of axes sorted by variance (highest to lowest)
+            self.sorted_variance_axes = np.argsort(-self.variance)  # Negative for descending order
+        
+        # Try to find unused high variance axis
+        if self.sorted_variance_axes is not None:
+            for axis in self.sorted_variance_axes:
+                if axis < 250 and axis not in self.used_axes:  # Only consider first 250 dimensions
+                    self.used_axes.add(axis)
+                    return axis
+        
+        # If all high variance axes used or no variance info, fall back to cyclic selection
+        for i in range(min(250, self.dimension)):  # Only consider first 250 dimensions
+            if i not in self.used_axes:
+                self.used_axes.add(i)
+                return i
+        
+        # If all axes used, start over
+        self.used_axes.clear()
+        return self._select_axis(depth)
     
     def _build_tree(self, points: np.ndarray, indices: np.ndarray, depth: int) -> Optional[KDNode]:
         """
@@ -111,24 +162,50 @@ class KDTreeRandomFilter:
         self.dimension = database.shape[1]
         self.database = database
         
+        # Generate query vectors to compute mean and variance
+        queries = np.random.uniform(0, 1, size=(n_queries, self.dimension))
+        
         # Compute filtering parameters
         max_fuel = 2_000_000_000
         base_fuel = 760_000_000
         alpha = 1700 * n_queries
         m = int((max_fuel - base_fuel) / alpha)  # Number of vectors for KD-tree
         
-        print(f"Taking first {m} database vectors for KD-tree")
+        print(f"Filtering {m} closest database vectors for KD-tree")
         
-        # Filter vectors for KD-tree by taking first m vectors
-        kd_vectors, self.kd_indices = self.filter_vectors(database, m)
+        # Time each step
+        t0 = time.time()
+        
+        # Calculate mean and variance
+        mean_query, self.variance = self.calculate_mean_and_variance(queries)
+        t1 = time.time()
+        print(f"  Time to calculate mean and variance: {(t1-t0)*1000:.2f}ms")
+        print(f"  Top 10 highest variance dimensions: {np.argsort(-self.variance)[:10]}")
+        print(f"  Their variances: {self.variance[np.argsort(-self.variance)[:10]]}")
+        
+        # Reset axis tracking for new tree build
+        self.used_axes.clear()
+        self.sorted_variance_axes = None
+        
+        # Filter vectors for KD-tree
+        kd_vectors, self.kd_indices = self.filter_relevant_vectors(database, mean_query, m)
+        t2 = time.time()
+        print(f"  Time to filter vectors: {(t2-t1)*1000:.2f}ms")
         
         # Get remaining vectors
-        self.r_vectors = database[m:]
-        self.r_indices = np.arange(m, len(database))
+        mask = np.ones(len(database), dtype=bool)
+        mask[self.kd_indices] = False
+        self.r_vectors = database[mask]
+        self.r_indices = np.arange(len(database))[mask]
+        t3 = time.time()
+        print(f"  Time to get remaining vectors: {(t3-t2)*1000:.2f}ms")
         
-        # Build KD-tree with filtered vectors
+        # Build KD-tree
         print(f"Building KD-tree with {m} vectors...")
         self.root = self._build_tree(kd_vectors, self.kd_indices, depth=0)
+        t4 = time.time()
+        print(f"  Time to build tree: {(t4-t3)*1000:.2f}ms")
+        print(f"Total build time: {(t4-t0)*1000:.2f}ms")
     
     def _search_node(self, node: Optional[KDNode], query: np.ndarray, threshold: float,
                     best_dist: float, best_node: Optional[KDNode]) -> Tuple[float, Optional[KDNode]]:
@@ -179,24 +256,21 @@ class KDTreeRandomFilter:
     
     def search(self, queries: np.ndarray, threshold: float) -> Tuple[bool, Optional[List[int]], Optional[List[float]]]:
         """
-        For each query vector, try to find a database vector within threshold distance.
-        Uses KD-tree for initial search and brute force for worst matches.
+        Search for matches to query vectors within distance threshold.
+        Uses both KD-tree and brute force on remaining vectors.
         
         Args:
-            queries: Array of shape (n_queries, dimension) containing query vectors
-            threshold: Maximum allowed distance between any query and its match
+            queries: Array of query vectors to find matches for
+            threshold: Maximum allowed distance for a match
             
         Returns:
             Tuple containing:
-                - Boolean indicating if matches were found for all queries
-                - If successful, list of database indices matched to each query
-                - If successful, list of distances for each match
+                - Whether matches were found for all queries
+                - List of database indices for matches (or None if not all found)
+                - List of distances to matches (or None if not all found)
         """
-        if self.root is None:
-            raise ValueError("Must build tree before searching")
-        
-        matches = []
-        distances = []
+        matches: List[int] = []
+        distances: List[float] = []
         
         # Reset statistics
         self.kdtree_search_time = 0.0
@@ -204,39 +278,48 @@ class KDTreeRandomFilter:
         self.n_kdtree_matches = 0
         self.n_bruteforce_matches = 0
         
-        # Process each query
         for query in queries:
             # Search KD-tree first
-            kdtree_start = time.time()
-            best_dist, best_node = self._search_node(
-                self.root, query, threshold,
-                float('inf'), None
-            )
-            self.kdtree_search_time += time.time() - kdtree_start
+            best_dist = float('inf')
+            best_node = None
             
-            # If no match found in KD-tree, try brute force on remaining vectors
-            if best_node is None:
-                # Calculate distances to remaining vectors
+            if self.root is not None:
+                kdtree_start = time.time()
+                best_dist, best_node = self._search_node(self.root, query, threshold, best_dist, best_node)
+                self.kdtree_search_time += time.time() - kdtree_start
+            
+            # If no match in KD-tree, try remaining vectors
+            if best_node is None and self.r_vectors is not None:
                 bruteforce_start = time.time()
                 r_distances = np.linalg.norm(self.r_vectors - query, axis=1)
-                best_r_idx = np.argmin(r_distances)
-                min_r_dist = r_distances[best_r_idx]
+                min_idx = np.argmin(r_distances)
+                min_dist = r_distances[min_idx]
                 self.bruteforce_search_time += time.time() - bruteforce_start
                 
-                if min_r_dist <= threshold:
-                    matches.append(self.r_indices[best_r_idx])
-                    distances.append(float(min_r_dist))
+                if min_dist <= threshold:
+                    matches.append(self.r_indices[min_idx])
+                    distances.append(float(min_dist))
                     self.n_bruteforce_matches += 1
                     continue
-                else:
-                    return False, None, None
-            else:
+            
+            # Use KD-tree match if found
+            if best_node is not None:
                 matches.append(best_node.index)
                 distances.append(best_dist)
                 self.n_kdtree_matches += 1
+            else:
+                # No match found for this query
+                return False, None, None
         
-        # Print match statistics
+        # Print timing and match statistics
+        total_time = self.kdtree_search_time + self.bruteforce_search_time
         total_matches = self.n_kdtree_matches + self.n_bruteforce_matches
+        
+        print("\nSearch Method Statistics:")
+        print(f"  KD-tree search:     {self.kdtree_search_time:.3f}s ({(self.kdtree_search_time/total_time)*100:.1f}% of search time)")
+        print(f"  Brute force search: {self.bruteforce_search_time:.3f}s ({(self.bruteforce_search_time/total_time)*100:.1f}% of search time)")
+        print(f"  Total search time:  {total_time:.3f}s")
+        
         print("\nMatch Statistics:")
         print(f"  Total matches found: {total_matches}")
         print(f"  KD-tree matches: {self.n_kdtree_matches} ({(self.n_kdtree_matches/total_matches)*100:.1f}%)")
@@ -244,45 +327,46 @@ class KDTreeRandomFilter:
         
         return True, matches, distances
 
-def run_kdtree(config, phase='build', data_structure=None):
+def run_kdtree(config: dict, phase: str = 'build', data_structure = None) -> Union[KDTreeMeanVarianceFilter, Tuple[bool, Optional[List[int]], Optional[List[float]]]]:
     """
-    Run KD-tree search algorithm with random filtering optimization.
+    Run KD-tree with mean variance filtering for either build or search phase.
     
     Args:
-        config: Configuration dictionary with parameters
+        config: Dictionary containing either:
+            - For build phase: {'database': database}
+            - For search phase: {'queries': queries, 'threshold': threshold}
         phase: Either 'build' or 'search'
-        data_structure: KDTreeRandomFilter instance from build phase
+        data_structure: The KD-tree built in build phase (only needed for search phase)
         
     Returns:
-        If phase == 'build': Returns the KDTreeRandomFilter instance
-        If phase == 'search': Returns (success, matches, distances) tuple
+        - For build phase: The constructed KD-tree
+        - For search phase: Tuple of (success, matches, distances)
     """
     if phase == 'build':
-        if 'database' not in config:
-            raise ValueError("Database vectors must be provided in config")
-            
-        # Build KD-tree with filtering
-        kdtree = KDTreeRandomFilter()
-        # Get n_queries from config or use default from VECTOR_SEARCH_CONFIG
-        n_queries = config.get('n_queries', VECTOR_SEARCH_CONFIG['n_queries'])
-        kdtree.build_tree(config['database'], n_queries)
+        database = config['database']
+        n_queries = VECTOR_SEARCH_CONFIG['n_queries']  # Get from global config
+        
+        kdtree = KDTreeMeanVarianceFilter()
+        kdtree.build_tree(database, n_queries)
         return kdtree
         
     elif phase == 'search':
         if data_structure is None:
-            raise ValueError("Must provide KDTreeRandomFilter instance for search phase")
-        if 'queries' not in config or 'threshold' not in config:
-            raise ValueError("Queries and threshold must be provided in config")
+            raise ValueError("data_structure must be provided for search phase")
             
-        kdtree = data_structure
-        success, matches, distances = kdtree.search(config['queries'], config['threshold'])
-        return success, matches, distances
+        queries = config['queries']
+        threshold = config['threshold']
+        
+        return data_structure.search(queries, threshold)
+    
+    else:
+        raise ValueError(f"Invalid phase: {phase}")
 
 if __name__ == "__main__":
     # Get parameters from config
     config = VECTOR_SEARCH_CONFIG.copy()
     
-    print(f"\nRunning KD-tree with random filtering search with parameters:")
+    print(f"\nRunning KD-tree with mean filtering search with parameters:")
     print(f"Database size: {config['n_database']}")
     print(f"Number of queries: {config['n_queries']}")
     print(f"Dimension: {config['dimension']}")

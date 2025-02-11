@@ -1,6 +1,7 @@
 import numpy as np
 import time
 from config import VECTOR_SEARCH_CONFIG
+from typing import Tuple, Optional, List
 
 def generate_random_vectors(n_vectors: int, dimension: int, seed: int = None) -> np.ndarray:
     """Generate random vectors with components from uniform[0,1]."""
@@ -18,6 +19,69 @@ def euclidean_distances_vectorized(queries: np.ndarray, database: np.ndarray) ->
     distances = np.sqrt(queries_squared + database_squared + cross_term)
     return distances
 
+class BruteForce:
+    def __init__(self):
+        """Initialize brute force search."""
+        self.database = None
+        # Add timing statistics
+        self.kdtree_search_time: float = 0.0  # Always 0 for brute force
+        self.bruteforce_search_time: float = 0.0
+        # Add match counting
+        self.n_bruteforce_matches: int = 0  # Number of matches found by brute force
+
+    def build(self, database: np.ndarray) -> None:
+        """Store database for later searching."""
+        self.database = database
+
+    def search(self, queries: np.ndarray, threshold: float) -> Tuple[bool, Optional[List[int]], Optional[List[float]]]:
+        """
+        For each query vector, try to find a database vector within threshold distance.
+        Uses brute force search (computes all pairwise distances).
+        
+        Args:
+            queries: Array of shape (n_queries, dimension) containing query vectors
+            threshold: Maximum allowed distance between any query and its match
+            
+        Returns:
+            Tuple containing:
+                - Boolean indicating if matches were found for all queries
+                - If successful, list of database indices matched to each query
+                - If successful, list of distances for each match
+        """
+        if self.database is None:
+            raise ValueError("Must build before searching")
+        
+        matches = []
+        distances = []
+        
+        # Reset statistics
+        self.kdtree_search_time = 0.0  # Always 0 for brute force
+        self.bruteforce_search_time = 0.0
+        self.n_bruteforce_matches = 0
+        
+        # Process each query
+        for query in queries:
+            # Calculate distances to all database vectors
+            bruteforce_start = time.time()
+            dists = np.linalg.norm(self.database - query, axis=1)
+            min_idx = np.argmin(dists)
+            min_dist = dists[min_idx]
+            self.bruteforce_search_time += time.time() - bruteforce_start
+            
+            if min_dist <= threshold:
+                matches.append(min_idx)
+                distances.append(float(min_dist))
+                self.n_bruteforce_matches += 1
+            else:
+                return False, None, None
+        
+        # Print match statistics
+        print("\nMatch Statistics:")
+        print(f"  Total matches found: {self.n_bruteforce_matches}")
+        print(f"  All matches found by brute force search")
+        
+        return True, matches, distances
+
 def run_bruteforce(config, phase='build', data_structure=None):
     """
     Run brute force search algorithm.
@@ -25,45 +89,29 @@ def run_bruteforce(config, phase='build', data_structure=None):
     Args:
         config: Configuration dictionary with parameters
         phase: Either 'build' or 'search'
-        data_structure: Database vectors from build phase
+        data_structure: BruteForce instance from build phase
         
     Returns:
-        If phase == 'build': Returns the database vectors
+        If phase == 'build': Returns the BruteForce instance
         If phase == 'search': Returns (success, matches, distances) tuple
     """
     if phase == 'build':
         if 'database' not in config:
             raise ValueError("Database vectors must be provided in config")
-        return config['database']
+            
+        # Build brute force searcher
+        brute_force = BruteForce()
+        brute_force.build(config['database'])
+        return brute_force
         
     elif phase == 'search':
         if data_structure is None:
-            raise ValueError("Must provide database vectors for search phase")
+            raise ValueError("Must provide BruteForce instance for search phase")
         if 'queries' not in config or 'threshold' not in config:
             raise ValueError("Queries and threshold must be provided in config")
             
-        database = data_structure
-        queries = config['queries']
-        threshold = config['threshold']
-        
-        # Calculate all distances at once
-        all_distances = euclidean_distances_vectorized(queries, database)
-        
-        # Find the first match for each query that's within threshold
-        matches = []
-        distances = []
-        
-        for query_idx, query_distances in enumerate(all_distances):
-            min_idx = np.argmin(query_distances)
-            min_dist = query_distances[min_idx]
-            
-            if min_dist <= threshold:
-                matches.append(int(min_idx))
-                distances.append(float(min_dist))
-            else:
-                return False, None, None
-        
-        return True, matches, distances
+        brute_force = data_structure
+        return brute_force.search(config['queries'], config['threshold'])
 
 if __name__ == "__main__":
     # Get parameters from config
@@ -79,14 +127,14 @@ if __name__ == "__main__":
     # Build phase
     print("\nBuilding (preparing database)...")
     build_start = time.time()
-    database = run_bruteforce(config, phase='build')
+    brute_force = run_bruteforce(config, phase='build')
     build_time = time.time() - build_start
     print(f"Build time: {build_time:.2f} seconds")
     
     # Search phase
     print("\nSearching for matches...")
     search_start = time.time()
-    success, matches, distances = run_bruteforce(config, phase='search', data_structure=database)
+    success, matches, distances = run_bruteforce(config, phase='search', data_structure=brute_force)
     search_time = time.time() - search_start
     
     # Print results
